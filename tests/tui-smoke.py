@@ -33,7 +33,7 @@ const store = SessionManager.create(process.cwd(), path.join(agent, 'synthetic-s
 for (let n = 0; n < 80; n++) store.appendMessage({ role: 'user', content: `line ${n}`, timestamp: Date.now() + n });
 const child = {
   id: randomUUID(), runId: randomUUID(), parentSessionId: root, anchor: null, depth: 1,
-  definition: { name: 'explore', description: 'Fixture', prompt: 'Fixture', tools: ['read'], source: 'built-in' },
+  definition: { name: 'general-purpose', description: 'Fixture', prompt: 'Fixture', tools: ['read'], source: 'built-in' },
   task: 'Synthetic read-only child', status: 'completed', startedAt: Date.now() - 20000,
   finishedAt: Date.now(), toolCount: 0, result: 'Synthetic report', file: store.getSessionFile(), background: true,
 };

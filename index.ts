@@ -2,7 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { CustomEditor, type SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { InlineBrowser } from "./inline-browser.ts";
-import { builtins, discover, type Definition } from "./definitions.ts";
+import { availableTools, generalPurpose, parentToolNames } from "./definitions.ts";
 import { ChildManager, type Caller, type Child } from "./manager.ts";
 
 const short = (s: string, n = 180) => s.length > n ? `${s.slice(0, n)}…` : s;
@@ -26,13 +26,11 @@ export default function (pi: ExtensionAPI) {
   }
   function caller(ctx: ExtensionContext): Caller {
     if (!ctx.model) throw new Error("Select a model first");
-    return { sessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), depth: 0, model: ctx.model, thinking: ctx.thinkingLevel, mode: ctx.mode, cwd: ctx.cwd, branchMessages: ctx.sessionManager.buildSessionContext().messages, branchEntryIds: ctx.sessionManager.getBranch().map(e => e.id), systemPrompt: ctx.getSystemPrompt() };
+    return { sessionId: ctx.sessionManager.getSessionId(), anchor: ctx.sessionManager.getLeafId(), depth: 0, model: ctx.model, thinking: ctx.thinkingLevel, mode: ctx.mode, cwd: ctx.cwd, branchMessages: ctx.sessionManager.buildSessionContext().messages, branchEntryIds: ctx.sessionManager.getBranch().map(e => e.id), systemPrompt: ctx.getSystemPrompt(), tools: parentToolNames(pi.getActiveTools()) };
   }
-  function definitions(ctx: ExtensionContext): Definition[] { return discover(ctx.cwd, ctx.isProjectTrusted()).definitions; }
-  function resolve(ctx: ExtensionContext, agent: string): Definition {
-    const found = definitions(ctx).find(d => d.name === agent);
-    if (!found) throw new Error(`No subagent '${agent}'. Use /subagents definitions; project definitions require project trust.`);
-    return found;
+  function grant(raw: string): string[] {
+    if (!raw.startsWith("--tools=")) throw new Error("Specify the child's tools with --tools=read,bash (or --tools= for none)");
+    return raw.slice("--tools=".length).split(",").filter(Boolean);
   }
   function widget(ctx: ExtensionContext) {
     if (ctx.mode !== "tui" || !browser) return;
@@ -112,7 +110,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", (_event, ctx) => {
-    manager = new ChildManager(ctx.sessionManager.getSessionId(), ctx.cwd);
+    manager = new ChildManager(ctx.sessionManager.getSessionId(), ctx.cwd, () => pi.getActiveTools());
     owner = ctx;
     browser = new InlineBrowser(manager, () => widget(ctx), (type, id) => { void browserAction(type, id, owner || ctx); });
     manager.onChange = () => browser?.invalidateTranscript();
@@ -152,8 +150,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   const parameters = Type.Object({
-    agent: Type.String({ description: "Definition name: general-purpose, explore, reviewer, worker or /subagents definitions" }),
     task: Type.String(),
+    tools: Type.Array(Type.Union(availableTools.map(t => Type.Literal(t))), { description: "Tools explicitly delegated to the child. Must be active on the parent; [] gives no tools." }),
     background: Type.Optional(Type.Boolean()),
     name: Type.Optional(Type.String()),
     fork: Type.Optional(Type.Boolean({ description: "Copy parent context, including in-flight assistant tool calls, with explicit synthetic results for unfinished calls" })),
@@ -161,9 +159,9 @@ export default function (pi: ExtensionAPI) {
     maxTurns: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Stop after this many completed assistant turns, returning resumable partial output" })),
   });
   pi.registerTool({
-    name: "delegate_agent", label: "Subagent", description: "Delegate work to a persistent agent with its own context. Use worker for edits/commands (each call requires human approval), background=true for TUI/RPC, fork=true to snapshot parent context with placeholders for in-flight tool calls, worktree=true to isolate files. Follow up with send_agent.",
+    name: "delegate_agent", label: "Subagent", description: "Run one general-purpose child with an explicit subset of your active tools. Granted tools run without per-call human confirmation. No tools are inherited implicitly. Background requires TUI/RPC; fork snapshots parent context with placeholders for in-flight tool calls. Follow up with send_agent.",
     parameters, executionMode: "parallel", exposure: "model-only",
-    renderCall: (args, theme) => new Text(`${theme.fg("accent", "◉")} ${args.agent}${args.name ? ` (${args.name})` : ""} · ${args.background ? "background" : "foreground"}\n${display(args.task, 220)}`, 1, 0),
+    renderCall: (args, theme) => new Text(`${theme.fg("accent", "◉")} general-purpose${args.name ? ` (${args.name})` : ""} · ${args.background ? "background" : "foreground"} · ${args.tools.join(",") || "no tools"}\n${display(args.task, 220)}`, 1, 0),
     renderResult: (result, options, theme) => {
       const details = result.details as { status?: string; childId?: string; usage?: { totalTokens: number; cost: { total: number } } } | undefined;
       const status = details?.status || (result.isError ? "failed" : "done");
@@ -172,7 +170,7 @@ export default function (pi: ExtensionAPI) {
     },
     execute: async (toolCallId, args, signal, onUpdate, ctx) => {
       try {
-        const child = await get(ctx).spawn(resolve(ctx, args.agent), args.task, caller(ctx), ctx, { background: args.background, name: args.name, fork: args.fork, worktree: args.worktree, maxTurns: args.maxTurns, signal, origin: "agent", launchCallId: toolCallId,
+        const child = await get(ctx).spawn({ ...generalPurpose, tools: args.tools }, args.task, caller(ctx), ctx, { background: args.background, name: args.name, fork: args.fork, worktree: args.worktree, maxTurns: args.maxTurns, signal, origin: "agent", launchCallId: toolCallId,
           onProgress: child => onUpdate?.({ content: [{ type: "text", text: `${child.name || child.definition.name} · ${child.toolCount} tools · ${child.lastTool || "working"}` }], details: { childId: child.id, status: child.status } }),
         });
         return {
@@ -228,20 +226,19 @@ export default function (pi: ExtensionAPI) {
         const [action = "tasks", ...rest] = args.trim().split(/\s+/);
         const m = get(ctx);
         if (action === "tasks" || action === "list") { await tasks(ctx); return; }
-        if (action === "definitions") { const d = discover(ctx.cwd, ctx.isProjectTrusted()); ctx.ui.notify([...d.definitions.map(x => `${x.name} (${x.source}): ${x.description} [${x.tools.join(", ")}]${x.maxTurns ? ` · maxTurns=${x.maxTurns}` : ""}${x.memory ? ` · memory=${x.memory}` : ""}${x.mcpServers ? ` · MCP=${Object.keys(x.mcpServers).join(",")}` : ""}${x.hooks ? ` · hooks=${Object.keys(x.hooks).join(",")}` : ""}`), ...d.errors].join("\n"), "info"); return; }
+        if (action === "tools") { ctx.ui.notify(`General-purpose only. Available to delegate: ${parentToolNames(pi.getActiveTools()).join(", ") || "none"}. Supported: ${availableTools.join(", ")}.`, "info"); return; }
         if (action === "show" || action === "open") { const c = m.get(rest[0]); if (ctx.mode === "tui") await tasks(ctx, c.id); else ctx.ui.notify(short(m.transcript(c.id), 4000), "info"); return; }
         if (action === "detach") { ctx.ui.notify(`${m.detach(rest[0]).id} is now running in background`, "info"); return; }
         if (action === "stop") { ctx.ui.notify(`${(await m.stop(rest[0], true)).status}`, "info"); return; }
         if (action === "send" || action === "resume") { const [id, ...words] = rest; const message = words.join(" "); if (action === "send") ctx.ui.notify(`Queued ${await m.send(id, message, undefined, ctx)}`, "info"); else ctx.ui.notify(`Resumed ${(await m.resume(id, message, ctx)).id}`, "info"); return; }
         if (action === "run" || action === "background") {
-          const [type, ...words] = rest;
-          const def = resolve(ctx, type);
-          const c = await m.spawn(def, words.join(" "), caller(ctx), ctx, { background: action === "background" });
+          const [toolArg = "", ...words] = rest;
+          const c = await m.spawn({ ...generalPurpose, tools: grant(toolArg) }, words.join(" "), caller(ctx), ctx, { background: action === "background" });
           accountHumanCommand(m, c, ctx);
           ctx.ui.notify(`${c.id}: ${c.status}${c.result ? `\n${short(c.result, 1000)}` : ""}`, c.status === "failed" ? "error" : "info");
           return;
         }
-        ctx.ui.notify("Usage: /subagents tasks|definitions|run TYPE TASK|background TYPE TASK|detach ID|open ID|send ID MESSAGE|resume ID TASK|stop ID", "warning");
+        ctx.ui.notify("Usage: /subagents tasks|tools|run --tools=read,bash TASK|background --tools=read TASK|detach ID|open ID|send ID MESSAGE|resume ID TASK|stop ID", "warning");
       } catch (e) { ctx.ui.notify(explanation(e), "error"); }
     },
   });
@@ -259,11 +256,12 @@ export default function (pi: ExtensionAPI) {
     },
   });
   pi.registerCommand("subtask", {
-    description: "Fork parent conversation into a foreground child; in-flight tool calls receive synthetic results",
+    description: "Fork parent context: /subtask --tools=read,bash TASK; unfinished tool calls receive synthetic results",
     handler: async (task, ctx) => {
       try {
         const m = get(ctx);
-        const c = await m.spawn(builtins[0], task, caller(ctx), ctx, { fork: true });
+        const [toolArg = "", ...words] = task.trim().split(/\s+/);
+        const c = await m.spawn({ ...generalPurpose, tools: grant(toolArg) }, words.join(" "), caller(ctx), ctx, { fork: true });
         accountHumanCommand(m, c, ctx);
         ctx.ui.notify(`${c.id}: ${c.status}\n${short(c.result || c.error || "", 1500)}`, c.status === "failed" ? "error" : "info");
       } catch (e) { ctx.ui.notify(explanation(e), "error"); }

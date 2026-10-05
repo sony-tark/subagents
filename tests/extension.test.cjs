@@ -16,6 +16,7 @@ async function load(entry, mocks) {
       plugins: [{ name: 'pi-test-doubles', setup(build) {
         build.onResolve({ filter: /.*/ }, args => {
           const key = args.path.startsWith('.') ? path.basename(args.path) : args.path;
+          if (key === 'definitions.ts') return; // Exercise the real tool grant policy in every test.
           if (Object.hasOwn(mocks, key)) return { path: key, namespace: 'pi-test-double' };
         });
         build.onLoad({ filter: /.*/, namespace: 'pi-test-double' }, args => ({ contents: mocks[args.path], loader: 'js' }));
@@ -29,22 +30,22 @@ const fakeTui = `exports.Text = class { constructor(text) { this.text = text; } 
 
 function record(status = 'completed') {
   return { id: 'child-12345678', runId: 'run-1', parentSessionId: 'root', anchor: null, depth: 1,
-    definition: { name: 'explore', tools: ['read'], source: 'built-in' }, task: 'Explore',
+    definition: { name: 'general-purpose', tools: ['read'], source: 'built-in' }, task: 'Inspect',
     status, startedAt:Date.now(), toolCount: 3, result: 'Done', usage: { totalTokens: 200, cost: { total: 1.25 } },
     background: false };
 }
 async function uiFixture(children, previousEditorFactory) {
-  const state = { children, editorFactory:previousEditorFactory, widgets: [], widgetNames: [], commands: {}, tools: {}, handlers: {}, accounts: [], custom: null, customOptions: null, renders: 0, terminalRows: 30,
+  const state = { children, editorFactory:previousEditorFactory, widgets: [], widgetNames: [], commands: {}, tools: {}, handlers: {}, accounts: [], spawns: [], notifications: [], custom: null, customOptions: null, renders: 0, terminalRows: 30,
     transcript: Array.from({length:80}, (_,i) => 'line '+i) };
   globalThis.__piSubagentTest = state;
   const mocks = {
     '@earendil-works/pi-ai': fakeType,
     '@earendil-works/pi-coding-agent': `exports.CustomEditor = class { constructor() { this.text=''; this.forwarded=[]; } getText() {return this.text;} setText(text) {this.text=text;} handleInput(key) {this.forwarded.push(key);} };`,
     '@earendil-works/pi-tui': fakeTui,
-    'definitions.ts': `exports.builtins = [{name:'explore', tools:['read'], source:'built-in'}]; exports.discover = () => ({definitions:exports.builtins, errors:[]});`,
-    'manager.ts': `class ChildManager { constructor() { globalThis.__piSubagentTest.manager=this; this.rootSessionId='root'; this.onChange=()=>{}; this.onNotice=()=>{}; } list() {return globalThis.__piSubagentTest.children;} currentUsage(c) {return c.usage;} get(id) {return this.list().find(c => c.id === id);} dismiss(id) {this.get(id).dismissed=true; this.onChange();} transcript() {return globalThis.__piSubagentTest.transcript.join('\\n');} account(child, store) {globalThis.__piSubagentTest.accounts.push([child,store]);} async spawn() {return globalThis.__piSubagentTest.children[0];} async shutdown() {} publish() {} deliverNested() {} } exports.ChildManager=ChildManager;`,
+    'manager.ts': `class ChildManager { constructor() { globalThis.__piSubagentTest.manager=this; this.rootSessionId='root'; this.onChange=()=>{}; this.onNotice=()=>{}; } list() {return globalThis.__piSubagentTest.children;} currentUsage(c) {return c.usage;} get(id) {return this.list().find(c => c.id === id);} dismiss(id) {this.get(id).dismissed=true; this.onChange();} transcript() {return globalThis.__piSubagentTest.transcript.join('\\n');} account(child, store) {globalThis.__piSubagentTest.accounts.push([child,store]);} async spawn(def,task) {globalThis.__piSubagentTest.spawns.push({def,task});return globalThis.__piSubagentTest.children[0];} async shutdown() {} publish() {} deliverNested() {} } exports.ChildManager=ChildManager;`,
   };
   const pi = {
+    getActiveTools: () => ['read','bash','edit','write'],
     on: (name, cb) => { state.handlers[name] = cb; }, registerTool: tool => { state.tools[tool.name] = tool; },
     registerCommand: (name, command) => { state.commands[name] = command; },
     registerMessageRenderer() {}, registerShortcut() {}, sendMessage() {},
@@ -52,7 +53,7 @@ async function uiFixture(children, previousEditorFactory) {
   const extension = await load('index.ts', mocks);
   extension.default(pi);
   const ui = {
-    setWidget: (name, widget) => {state.widgetNames.push(name);state.widgets.push(widget);state.renders++;}, setEditorComponent: factory => {state.editorFactory=factory;}, getEditorComponent: () => state.editorFactory, notify() {},
+    setWidget: (name, widget) => {state.widgetNames.push(name);state.widgets.push(widget);state.renders++;}, setEditorComponent: factory => {state.editorFactory=factory;}, getEditorComponent: () => state.editorFactory, notify(message) {state.notifications.push(message);},
     custom: (factory, options) => new Promise(resolve => { state.customOptions = options; state.custom = factory({ terminal:{ get rows() {return state.terminalRows;} }, requestRender() {state.renders++;} }, { fg: (_color, value) => value, bg: (_color, value) => value }, {}, resolve); }),
   };
   const store = { getSessionId: () => 'root', getBranch: () => [], getLeafId: () => null,
@@ -140,7 +141,7 @@ test('finished children leave the passive panel but remain in inline history', a
   await state.commands.subagents.handler('tasks',ctx);
   const {render}=editorAndWidget(state);
   assert.match(render(),/❯.*Main agent/);
-  assert.match(render(),/explore/);
+  assert.match(render(),/general-purpose/);
   assert.equal(state.custom,null);
 });
 
@@ -160,9 +161,9 @@ test('dismiss removes an inline row but h can reveal saved history', async () =>
   const {editor,render}=editorAndWidget(state);
   editor.handleInput('down'); editor.handleInput('down'); editor.handleInput('x');
   await new Promise(resolve => setImmediate(resolve));
-  assert.doesNotMatch(render(),/explore/);
+  assert.doesNotMatch(render(),/general-purpose/);
   editor.handleInput('h');
-  assert.match(render(),/explore/);
+  assert.match(render(),/general-purpose/);
 });
 
 test('empty inline selector returns to the composer with Up', async () => {
@@ -225,10 +226,22 @@ test('inline cost and foreground tool results show the child usage', async () =>
   assert.match(result.text,/\$1\.25/);
 });
 
-test('human foreground command attributes child usage to root session', async () => {
+test('human foreground command grants only the requested tools and attributes usage', async () => {
   const { state, ctx, store } = await uiFixture([record()]);
-  await state.commands.subagents.handler('run explore Explore', ctx);
+  await state.commands.subagents.handler('run --tools=read Inspect', ctx);
+  assert.deepEqual(state.spawns.map(s => [s.def.name,s.def.tools,s.task]), [['general-purpose',['read'],'Inspect']]);
   assert.deepEqual(state.accounts, [[state.children[0], store]]);
+});
+
+test('model spawn uses a single general-purpose child and never lists definitions', async () => {
+  const {state,ctx}=await uiFixture([record()]);
+  assert.equal(state.tools.delegate_agent.parameters[0].agent, undefined);
+  assert.ok(state.tools.delegate_agent.parameters[0].tools);
+  await state.tools.delegate_agent.execute('launch', {task:'Update code',tools:['read','edit']}, undefined, undefined, ctx);
+  assert.deepEqual(state.spawns.map(s => [s.def.name,s.def.tools,s.task]), [['general-purpose',['read','edit'],'Update code']]);
+  await state.commands.subagents.handler('tools',ctx);
+  assert.match(state.notifications.at(-1),/read.*bash.*edit.*write/);
+  assert.equal(state.commands.definitions,undefined);
 });
 
 test('inline transcript g/G and live updates follow the newest output', async () => {
@@ -257,6 +270,78 @@ test('open ID selects an inline child without switching Pi sessions', async () =
   assert.match(render(),/❯.*second-agent/);
   assert.equal(ctx.sessionManager.getSessionId(),'root');
   assert.equal(state.custom,null);
+});
+
+test('the only subagent is general-purpose and grants cannot exceed parent tools', async () => {
+  const defs=await load('definitions.ts',{});
+  assert.equal(defs.generalPurpose.name,'general-purpose');
+  assert.equal(defs.discover,undefined, 'agent files are never scanned');
+  assert.deepEqual(defs.delegateTools(['read','write','read'],['read','write']),['read','write']);
+  assert.throws(()=>defs.delegateTools(['bash'],['read']),/Parent cannot delegate/);
+  assert.throws(()=>defs.delegateTools(['unknown'],['unknown']),/selected from/);
+});
+
+test('spawn refuses roles and tools not held by its parent before creating a child', async () => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'pi-subagent-grant-test-'));
+  try {
+    const {ChildManager}=await load('manager.ts',{
+      '@earendil-works/pi-ai':fakeType,
+      '@earendil-works/pi-coding-agent':`exports.getAgentDir=()=>${JSON.stringify(dir)};`,
+      'runtime.ts':`exports.childResources=async()=>({});`,
+    });
+    const m=new ChildManager('root',dir);
+    const def={name:'general-purpose',source:'built-in',description:'General purpose',prompt:'Inspect',tools:['bash']};
+    const caller={depth:0,tools:['read'],model:{provider:'test',id:'test'},mode:'tui'};
+    await assert.rejects(m.spawn(def,'Task',caller,{mode:'tui'}),/Parent cannot delegate.*bash/);
+    await assert.rejects(m.spawn({...def,name:'explore',tools:['read']},'Task',caller,{mode:'tui'}),/Only general-purpose/);
+    await assert.rejects(m.spawn({...def,tools:['read']},'Task',caller,{mode:'tui'},{worktree:true}),/requires a delegated bash/);
+    assert.equal(m.list().length,0);
+  } finally {fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test('nested grants cannot exceed the child parent, and root grant revocation blocks resume', async () => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'pi-subagent-nested-grant-test-'));
+  try {
+    const {ChildManager}=await load('manager.ts',{
+      '@earendil-works/pi-ai':fakeType,
+      '@earendil-works/pi-coding-agent':`exports.getAgentDir=()=>${JSON.stringify(dir)};`,
+      'runtime.ts':`exports.childResources=async()=>({});`,
+    });
+    const m=new ChildManager('root',dir,()=>['read']);
+    const parent={...record('running'),id:'parent',definition:{name:'general-purpose',source:'built-in',tools:['read'],prompt:'Do the task'}};
+    m.records.set(parent.id,parent);
+    const store={getSessionId:()=> 'parent-session',getLeafId:()=>null,getCwd:()=>dir,buildSessionContext:()=>({messages:[]}),getBranch:()=>[]};
+    m.live.set(parent.id,{session:{model:{provider:'test',id:'test'},sessionManager:store,getActiveToolNames:()=>['agent_read','delegate_agent'],systemPrompt:'Parent prompt'}});
+    const caller=m.childCaller(parent,{mode:'tui'});
+    assert.deepEqual(caller.tools,['read']);
+    await assert.rejects(m.spawn({...parent.definition,source:'inherited',tools:['bash']},'Task',caller,{mode:'tui'}),/Parent cannot delegate.*bash/);
+    assert.equal(m.list().length,1);
+    const revoked={...record(),definition:{name:'general-purpose',source:'built-in',tools:['bash']}};
+    assert.throws(()=>m.resumeDefinition(revoked,{}),/Parent cannot delegate.*bash/);
+    assert.throws(()=>m.resumeDefinition({...revoked,definition:{...revoked.definition,name:'explore'}},{}),/removed definition/);
+  } finally {fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test('delegated bash runs without a UI prompt, but only on the owning branch', async () => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'pi-subagent-tool-test-'));
+  try {
+    const {ChildManager}=await load('manager.ts',{
+      '@earendil-works/pi-ai':fakeType,
+      '@earendil-works/pi-coding-agent':`exports.getAgentDir=()=>${JSON.stringify(dir)}; exports.createBashTool=()=>({description:'bash',parameters:{},execute:async()=>{globalThis.__delegatedCalls++;return {content:[],details:undefined};}}); exports.createEditTool=exports.createWriteTool=()=>({description:'write',parameters:{},execute:async()=>({content:[],details:undefined})});`,
+      'runtime.ts':`exports.childResources=async()=>({});`,
+    });
+    globalThis.__delegatedCalls=0;
+    const m=new ChildManager('root',dir);
+    const child={...record('running'),definition:{name:'general-purpose',source:'built-in',tools:['bash']},anchor:null};
+    const ctx={sessionManager:{getSessionId:()=> 'root',getBranch:()=>[]},hasUI:false};
+    const [bash]=m.approvedTools(child,ctx,dir);
+    assert.equal(bash.name,'agent_bash');
+    assert.equal((await bash.execute('call',{command:'echo ok'})).isError,undefined);
+    assert.equal(globalThis.__delegatedCalls,1);
+    const wrong={sessionManager:{getSessionId:()=> 'other',getBranch:()=>[]}};
+    assert.equal((await m.approvedTools(child,wrong,dir)[0].execute('call',{command:'echo no'})).isError,true);
+    assert.equal(globalThis.__delegatedCalls,1);
+  } finally {delete globalThis.__delegatedCalls;fs.rmSync(dir,{recursive:true,force:true});}
 });
 
 test('live child view includes the tool call, not only its result', async () => {
@@ -315,13 +400,12 @@ test('a nested child can cold-resume while its owning parent is active', async (
     const { ChildManager } = await load('manager.ts', {
       '@earendil-works/pi-ai': fakeType,
       '@earendil-works/pi-coding-agent': `exports.getAgentDir=()=>${JSON.stringify(dir)}; exports.SessionManager={open:()=>globalThis.__nestedStore}; exports.createAgentSession=async()=>({session:globalThis.__nestedSession}); for (const name of ['Read','Grep','Find','Ls','Bash','Edit','Write']) exports['create'+name+'Tool']=()=>({description:'test',parameters:{},execute:()=>{}});`,
-      'definitions.ts': `exports.discover=()=>({definitions:[{name:'explore',source:'built-in',tools:['read'],prompt:'Explore'}],errors:[]});`,
       'runtime.ts': `exports.childResources=async()=>({resourceLoader:{},settingsManager:{}});`,
     });
     globalThis.__nestedStore = store; globalThis.__nestedSession = childSession;
-    const m = new ChildManager('root', dir);
+    const m = new ChildManager('root', dir, () => ['read']);
     const parent = record('running'); parent.id='parent-id'; parent.definition.source='built-in';
-    parent.definition.name='explore'; parent.parentSessionId='root'; parent.anchor=null;
+    parent.parentSessionId='root'; parent.anchor=null;
     const child = record(); child.id='nested-id'; child.parentId=parent.id; child.parentSessionId='parent-session'; child.anchor='parent-anchor';
     child.depth=2; child.file=saved; child.definition={...child.definition, source:'inherited', name:'general-purpose'};
     m.records.set(parent.id,parent); m.records.set(child.id,child);
