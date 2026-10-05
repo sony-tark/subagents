@@ -1,0 +1,14 @@
+{
+  "name": "subagents",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Persistent in-process subagents for Pi",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
