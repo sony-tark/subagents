@@ -4,20 +4,20 @@ This extension runs **persistent in-process Pi SDK child sessions**, rather than
 
 ## Install from GitHub
 
-This repository is a Pi package: `package.json` points Pi to `index.ts`. On the other machine, install Pi, set up access to your model, and authenticate GitHub SSH (required while the repository is private). Then run:
+This public repository is a Pi package: `package.json` points Pi to `index.ts`. On the other machine, install Pi, set up access to your model, then run (no GitHub credentials required):
 
 ```sh
-pi install git:git@github.com:sony-tark/subagents
+pi install git:github.com/sony-tark/subagents
 pi list
 pi
 # In Pi, run: /subagents definitions
 ```
 
-If the repository is made public, you can instead use `pi install git:github.com/sony-tark/subagents` without GitHub credentials. Run `pi update --extensions` to pull later changes. Pi installs the package into its own managed directory and adds it to your personal settings. **Do not also keep a manual copy in `<agent-dir>/extensions/subagents/` on that machine**, or Pi will load both copies and their commands/tools will conflict. The extension was tested with Pi 1.0.2 (`pi --version`); other versions may need changes. Copy custom definitions from `<agent-dir>/agents/` separately if you use them.
+Run `pi update --extensions` to pull later changes. Pi installs the package into its own managed directory and adds it to your personal settings. **Do not also keep a manual copy in `<agent-dir>/extensions/subagents/` on that machine**, or Pi will load both copies and their commands/tools will conflict. The extension was tested with Pi 1.0.2 (`pi --version`); other versions may need changes. Copy custom definitions from `<agent-dir>/agents/` separately if you use them.
 
 ### Install without GitHub
 
-If the repository has not been published yet, you can transfer the directory manually instead. On this machine (macOS/Linux), package and transfer the whole directory:
+If GitHub is unavailable, you can transfer the directory manually instead. On the source machine (macOS/Linux), package and transfer the whole directory:
 
 ```sh
 tar -czf subagents.tar.gz -C "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/extensions" subagents
